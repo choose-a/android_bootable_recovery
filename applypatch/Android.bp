@@ -113,6 +113,8 @@ cc_binary {
         "liblog",
         "libz",
         "libziparchive",
+        "libbmlutils",
+        "libmtdutils",
     ],
 }
 
