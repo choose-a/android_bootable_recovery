@@ -273,44 +273,6 @@ int DataManager::LoadValues(const string& filename)
 	return 0;
 }
 
-int DataManager::LoadPersistValues(void)
-{
-	static bool loaded = false;
-	string dev_id;
-
-	// Only run this function once, and make sure normal settings file has not yet been read
-	if (loaded || !mBackingFile.empty() || !TWFunc::Path_Exists(PERSIST_SETTINGS_FILE))
-		return -1;
-
-	LOGINFO("Attempt to load settings from /persist settings file...\n");
-
-	if (!mInitialized)
-		SetDefaultValues();
-
-	GetValue("device_id", dev_id);
-	mPersist.SetFile(PERSIST_SETTINGS_FILE);
-	mPersist.SetFileVersion(FILE_VERSION);
-
-	// Read in the file, if possible
-	pthread_mutex_lock(&m_valuesLock);
-	mPersist.LoadValues();
-
-#ifndef TW_NO_SCREEN_TIMEOUT
-	blankTimer.setTime(mPersist.GetIntValue("tw_screen_timeout_secs"));
-#endif
-
-	update_tz_environment_variables();
-	TWFunc::Set_Brightness(GetStrValue("tw_brightness"));
-
-	pthread_mutex_unlock(&m_valuesLock);
-
-	/* Don't set storage nor backup paths this early */
-
-	loaded = true;
-
-	return 0;
-}
-
 int DataManager::Flush()
 {
 	return SaveValues();
@@ -319,15 +281,6 @@ int DataManager::Flush()
 int DataManager::SaveValues()
 {
 #ifndef TW_OEM_BUILD
-	if (PartitionManager.Mount_By_Path("/persist", false)) {
-		mPersist.SetFile(PERSIST_SETTINGS_FILE);
-		mPersist.SetFileVersion(FILE_VERSION);
-		pthread_mutex_lock(&m_valuesLock);
-		mPersist.SaveValues();
-		pthread_mutex_unlock(&m_valuesLock);
-		LOGINFO("Saved settings file values to %s\n", PERSIST_SETTINGS_FILE);
-	}
-
 	if (mBackingFile.empty())
 		return -1;
 
@@ -510,18 +463,56 @@ int DataManager::SetValue(const string& varName, const unsigned long long& value
 	return SetValue(varName, valStr.str(), persist);
 }
 
+// For legacy code that doesn't set a scope
 int DataManager::SetProgress(const float Fraction) {
-	return SetValue("ui_progress", (float) (Fraction * 100.0));
+	if (SetValue("ui_portion_size", 0) != 0)
+		return -1;
+	if (SetValue("ui_portion_start", 0) != 0)
+		return -1;
+	ShowProgress(1, 0);
+	int res = _SetProgress(Fraction);
+	if (SetValue("ui_portion_size", 0) != 0)
+		return -1;
+	if (SetValue("ui_portion_start", 0) != 0)
+		return -1;
+	return res;
 }
 
-int DataManager::ShowProgress(const float Portion, const float Seconds)
+int DataManager::_SetProgress(float Fraction) {
+	float Portion_Start, Portion_Size;
+	GetValue("ui_portion_size", Portion_Size);
+	GetValue("ui_portion_start", Portion_Start);
+	//LOGINFO("SetProgress(%.2lf): Portion_Size: %.2lf Portion_Start: %.2lf\n", Fraction, Portion_Size, Portion_Start);
+	if (Fraction < 0.0)
+		Fraction = 0;
+	if (Fraction > 1.0)
+		Fraction = 1;
+	if (SetValue("ui_progress", (float) ((Portion_Start + (Portion_Size * Fraction)) * 100.0)) != 0)
+		return -1;
+	return (SetValue("ui_progress_portion", 0) != 0);
+}
+
+int DataManager::ShowProgress(float Portion, const float Seconds)
 {
-	float Starting_Portion;
-	GetValue("ui_progress_portion", Starting_Portion);
-	if (SetValue("ui_progress_portion", (float)(Portion * 100.0) + Starting_Portion) != 0)
+	float Portion_Start, Portion_Size;
+	GetValue("ui_portion_size", Portion_Size);
+	GetValue("ui_portion_start", Portion_Start);
+	Portion_Start += Portion_Size;
+	if(Portion + Portion_Start > 1.0)
+		Portion = 1.0 - Portion_Start;
+	//LOGINFO("ShowProgress(%.2lf, %.2lf): Portion_Start: %.2lf\n", Portion, Seconds, Portion_Start);
+	if (SetValue("ui_portion_start", Portion_Start) != 0)
 		return -1;
-	if (SetValue("ui_progress_frames", Seconds * 30) != 0)
+	if (SetValue("ui_portion_size", Portion) != 0)
 		return -1;
+	if (SetValue("ui_progress", (float)(Portion_Start * 100.0)) != 0)
+		return -1;
+	if(Seconds) {
+		if (SetValue("ui_progress_portion", (float)((Portion * 100.0) + Portion_Start)) != 0)
+			return -1;
+		if (SetValue("ui_progress_frames", Seconds * 48) != 0)
+			return -1;
+	}
 	return 0;
 }
 
@@ -587,9 +578,16 @@ void DataManager::SetDefaultValues()
 	mConst.SetValue("false", "0");
 
 	mConst.SetValue(TW_VERSION_VAR, TW_VERSION_STR);
+
+#ifndef TW_NO_HAPTICS
 	mPersist.SetValue("tw_button_vibrate", "80");
 	mPersist.SetValue("tw_keyboard_vibrate", "40");
 	mPersist.SetValue("tw_action_vibrate", "160");
+	mConst.SetValue("tw_disable_haptics", "0");
+#else
+	LOGINFO("TW_NO_HAPTICS := true\n");
+	mConst.SetValue("tw_disable_haptics", "1");
+#endif
 
 	TWPartition *store = PartitionManager.Get_Default_Storage_Partition();
 	if (store)
@@ -715,6 +713,10 @@ void DataManager::SetDefaultValues()
 	printf("TW_HAS_DOWNLOAD_MODE := true\n");
 	mConst.SetValue(TW_DOWNLOAD_MODE, "1");
 #endif
+#ifdef TW_HAS_EDL_MODE
+	printf("TW_HAS_EDL_MODE := true\n");
+	mConst.SetValue(TW_EDL_MODE, "1");
+#endif
 #ifdef TW_INCLUDE_CRYPTO
 	mConst.SetValue(TW_HAS_CRYPTO, "1");
 	printf("TW_INCLUDE_CRYPTO := true\n");
@@ -772,6 +774,7 @@ void DataManager::SetDefaultValues()
 #else
 	mPersist.SetValue(TW_NO_SHA2, "1");
 #endif
+	mPersist.SetValue(TW_UNMOUNT_SYSTEM, "1");
 
 #ifdef TW_NO_SCREEN_TIMEOUT
 	mConst.SetValue("tw_screen_timeout_secs", "0");
@@ -898,14 +901,21 @@ void DataManager::SetDefaultValues()
 #ifdef TW_OEM_BUILD
 	LOGINFO("TW_OEM_BUILD := true\n");
 	mConst.SetValue("tw_oem_build", "1");
+	mConst.SetValue("tw_app_installed_in_system", "0");
 #else
 	mConst.SetValue("tw_oem_build", "0");
 	mPersist.SetValue("tw_app_prompt", "1");
 	mPersist.SetValue("tw_app_install_system", "1");
 	mData.SetValue("tw_app_install_status", "0"); // 0 = no status, 1 = not installed, 2 = already installed
+	mData.SetValue("tw_app_installed_in_system", "0");
 #endif
 
-        mData.SetValue("tw_enable_adb_backup", "0");
+	mData.SetValue("tw_enable_adb_backup", "0");
+
+	if (TWFunc::Path_Exists("/sbin/magiskboot"))
+		mConst.SetValue("tw_has_repack_tools", "1");
+	else
+		mConst.SetValue("tw_has_repack_tools", "0");
 
 	pthread_mutex_unlock(&m_valuesLock);
 }
@@ -1031,33 +1041,45 @@ void DataManager::Output_Version(void)
 	string Path;
 	char version[255];
 
-	if (!PartitionManager.Mount_By_Path("/cache", false)) {
-		LOGINFO("Unable to mount '%s' to write version number.\n", Path.c_str());
+	std::string logDir = TWFunc::get_log_dir();
+	if (logDir.empty()) {
+		LOGINFO("Unable to find cache directory\n");
 		return;
 	}
-	if (!TWFunc::Path_Exists("/cache/recovery/.")) {
-		LOGINFO("Recreating /cache/recovery folder.\n");
-		if (mkdir("/cache/recovery", S_IRWXU | S_IRWXG | S_IWGRP | S_IXGRP) != 0) {
-			LOGERR("DataManager::Output_Version -- Unable to make /cache/recovery\n");
+
+	std::string recoveryLogDir = logDir + "recovery/";
+
+	if (logDir == CACHE_LOGS_DIR) {
+		if (!PartitionManager.Mount_By_Path(CACHE_LOGS_DIR, false)) {
+			LOGINFO("Unable to mount '%s' to write version number.\n", Path.c_str());
 			return;
 		}
+
+		if (!TWFunc::Path_Exists(recoveryLogDir)) {
+			LOGINFO("Recreating %s folder.\n", recoveryLogDir.c_str());
+			if (!TWFunc::Create_Dir_Recursive(recoveryLogDir.c_str(), S_IRWXU | S_IRWXG | S_IWGRP | S_IXGRP, 0, 0)) {
+				LOGERR("DataManager::Output_Version -- Unable to make %s: %s\n", recoveryLogDir.c_str(), strerror(errno));
+				return;
+			}
+		}
 	}
-	Path = "/cache/recovery/.version";
-	if (TWFunc::Path_Exists(Path)) {
-		unlink(Path.c_str());
+
+	std::string verPath = recoveryLogDir + ".version";
+	if (TWFunc::Path_Exists(verPath)) {
+		unlink(verPath.c_str());
 	}
-	FILE *fp = fopen(Path.c_str(), "w");
+	FILE *fp = fopen(verPath.c_str(), "w");
 	if (fp == NULL) {
-		gui_msg(Msg(msg::kError, "error_opening_strerr=Error opening: '{1}' ({2})")(Path)(strerror(errno)));
+		gui_msg(Msg(msg::kError, "error_opening_strerr=Error opening: '{1}' ({2})")(verPath)(strerror(errno)));
 		return;
 	}
 	strcpy(version, TW_VERSION_STR);
 	fwrite(version, sizeof(version[0]), strlen(version) / sizeof(version[0]), fp);
 	fclose(fp);
-	TWFunc::copy_file("/etc/recovery.fstab", "/cache/recovery/recovery.fstab", 0644);
+	TWFunc::copy_file("/etc/recovery.fstab", recoveryLogDir + "recovery.fstab", 0644);
 	PartitionManager.Output_Storage_Fstab();
 	sync();
-	LOGINFO("Version number saved to '%s'\n", Path.c_str());
+	LOGINFO("Version number saved to '%s'\n", verPath.c_str());
 #endif
 }
 
@@ -1070,10 +1092,6 @@ void DataManager::ReadSettingsFile(void)
 
 	GetValue(TW_IS_ENCRYPTED, is_enc);
 	GetValue(TW_HAS_DATA_MEDIA, has_data_media);
-	if (is_enc == 1 && has_data_media == 1) {
-		LOGINFO("Cannot load settings -- encrypted.\n");
-		return;
-	}
 
 	memset(mkdir_path, 0, sizeof(mkdir_path));
 	memset(settings_file, 0, sizeof(settings_file));
@@ -1110,9 +1128,11 @@ string DataManager::GetSettingsStoragePath(void)
 
 void DataManager::Vibrate(const string& varName)
 {
+#ifndef TW_NO_HAPTICS
 	int vib_value = 0;
 	GetValue(varName, vib_value);
 	if (vib_value) {
 		vibrate(vib_value);
 	}
+#endif
 }

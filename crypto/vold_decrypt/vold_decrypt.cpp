@@ -74,6 +74,7 @@ namespace {
 #define LOGERROR(...) do { printf(__VA_ARGS__); if (fp_kmsg) { fprintf(fp_kmsg, "[VOLD_DECRYPT]E:" __VA_ARGS__); fflush(fp_kmsg); } } while (0)
 
 FILE *fp_kmsg = NULL;
+int sdkver = 20;
 
 
 /* Debugging Functions */
@@ -223,7 +224,7 @@ string Wait_For_Property(const string& property_name, int utimeout = SLEEP_MAX_U
 				break;
 			LOGKMSG("waiting for %s to change from '%s' to '%s'\n", property_name.c_str(), prop_value, expected_value.c_str());
 			utimeout -= SLEEP_MIN_USEC;
-			usleep(SLEEP_MIN_USEC);;
+			usleep(SLEEP_MIN_USEC);
 		}
 	}
 	property_get(property_name.c_str(), prop_value, "error");
@@ -766,7 +767,6 @@ vector<AdditionalService> Get_List_Of_Additional_Services(void) {
 void Set_Needed_Properties(void) {
 	// vold won't start without ro.storage_structure on Kitkat
 	string sdkverstr = TWFunc::System_Property_Get("ro.build.version.sdk");
-	int sdkver = 20;
 	if (!sdkverstr.empty()) {
 		sdkver = atoi(sdkverstr.c_str());
 	}
@@ -775,8 +775,201 @@ void Set_Needed_Properties(void) {
 		if (!ro_storage_structure.empty())
 			property_set("ro.storage_structure", ro_storage_structure.c_str());
 	}
+	property_set("hwservicemanager.ready", "false");
+	property_set("sys.listeners.registered", "false");
+	property_set("vendor.sys.listeners.registered", "false");
 }
 
+void Update_Patch_Level(void) {
+	// On Oreo and above, keymaster requires Android version & patch level to match installed system
+	string sdkverstr = TWFunc::System_Property_Get("ro.build.version.sdk");
+	if (!sdkverstr.empty()) {
+		sdkver = atoi(sdkverstr.c_str());
+	}
+	if (sdkver <= 25) {
+		property_set("vold_decrypt.legacy_system", "true");
+	} else {
+		LOGINFO("Current system is Oreo or above. Setting OS version and security patch level from installed system...\n");
+		property_set("vold_decrypt.legacy_system", "false");
+	}
+
+	char prop_value[PROPERTY_VALUE_MAX];
+	char legacy_system_value[PROPERTY_VALUE_MAX] = "false";
+	property_get("vold_decrypt.legacy_system", prop_value, "");
+
+	// Only set OS ver and patch level if device uses Oreo+ system
+	if (strcmp(prop_value, legacy_system_value) == 0) {
+		property_get("ro.build.version.release", prop_value, "");
+		std::string osver_orig = prop_value;
+		property_set("vold_decrypt.osver_orig", osver_orig.c_str());
+		LOGINFO("Current OS version: %s\n", osver_orig.c_str());
+
+		int error = 0;
+		std::string osver = TWFunc::System_Property_Get("ro.build.version.release");
+		if (!(osver == osver_orig)) {
+			if (!(error = TWFunc::Property_Override("ro.build.version.release", osver))) {
+				LOGINFO("Property override successful! New OS version: %s\n", osver.c_str());
+			} else {
+				LOGERROR("Property override failed, code %d\n", error);
+				return;
+			}
+			// TODO: Confirm whether we actually need to update the props in prop.default
+			std::string sed_osver = "sed -i 's/ro.build.version.release=.*/ro.build.version.release=" + osver + "/g' /prop.default";
+			TWFunc::Exec_Cmd(sed_osver);
+			property_set("vold_decrypt.osver_set", "true");
+		} else {
+			LOGINFO("Current OS version & System OS version already match. Proceeding to next step.\n");
+			property_set("vold_decrypt.osver_set", "false");
+		}
+
+		property_get("ro.build.version.security_patch", prop_value, "");
+		std::string patchlevel_orig = prop_value;
+		property_set("vold_decrypt.patchlevel_orig", patchlevel_orig.c_str());
+		LOGINFO("Current security patch level: %s\n", patchlevel_orig.c_str());
+
+		std::string patchlevel = TWFunc::System_Property_Get("ro.build.version.security_patch");
+		if (!(patchlevel == patchlevel_orig)) {
+			if (!(error = TWFunc::Property_Override("ro.build.version.security_patch", patchlevel))) {
+				LOGINFO("Property override successful! New security patch level: %s\n", patchlevel.c_str());
+			} else {
+				LOGERROR("Property override failed, code %d\n", error);
+				return;
+			}
+			// TODO: Confirm whether we actually need to update the props in prop.default
+			std::string sed_patchlevel = "sed -i 's/ro.build.version.security_patch=.*/ro.build.version.security_patch=" + patchlevel + "/g' /prop.default";
+			TWFunc::Exec_Cmd(sed_patchlevel);
+			property_set("vold_decrypt.patchlevel_set", "true");
+		} else {
+			LOGINFO("Current security patch level & System security patch level already match. Proceeding to next step.\n");
+			property_set("vold_decrypt.patchlevel_set", "false");
+		}
+		return;
+	} else {
+		LOGINFO("Current system is Nougat or older. Skipping OS version and security patch level setting...\n");
+		return;
+	}
+}
+
+void Revert_Patch_Level(void) {
+	char osver_set[PROPERTY_VALUE_MAX];
+	char patchlevel_set[PROPERTY_VALUE_MAX];
+	char osver_patchlevel_set[PROPERTY_VALUE_MAX] = "false";
+
+	property_get("vold_decrypt.osver_set", osver_set, "");
+	property_get("vold_decrypt.patchlevel_set", patchlevel_set, "");
+
+	int osver_result = strcmp(osver_set, osver_patchlevel_set);
+	int patchlevel_result = strcmp(patchlevel_set, osver_patchlevel_set);
+	if (!(osver_result == 0 && patchlevel_result == 0)) {
+		char prop_value[PROPERTY_VALUE_MAX];
+		LOGINFO("Reverting OS version and security patch level to original TWRP values...\n");
+		property_get("vold_decrypt.osver_orig", prop_value, "");
+		std::string osver_orig = prop_value;
+		property_get("ro.build.version.release", prop_value, "");
+		std::string osver = prop_value;
+
+		int error = 0;
+		if (!(osver == osver_orig)) {
+			if (!(error = TWFunc::Property_Override("ro.build.version.release", osver_orig))) {
+				LOGINFO("Property override successful! Original OS version: %s\n", osver_orig.c_str());
+			} else {
+				LOGERROR("Property override failed, code %d\n", error);
+				return;
+			}
+			// TODO: Confirm whether we actually need to update the props in prop.default
+			std::string sed_osver_orig = "sed -i 's/ro.build.version.release=.*/ro.build.version.release=" + osver_orig + "/g' /prop.default";
+			TWFunc::Exec_Cmd(sed_osver_orig);
+		}
+
+		property_get("vold_decrypt.patchlevel_orig", prop_value, "");
+		std::string patchlevel_orig = prop_value;
+		property_get("ro.build.version.security_patch", prop_value, "");
+		std::string patchlevel = prop_value;
+
+		if (!(patchlevel == patchlevel_orig)) {
+			if (!(error = TWFunc::Property_Override("ro.build.version.security_patch", patchlevel_orig))) {
+				LOGINFO("Property override successful! Original security patch level: %s\n", patchlevel_orig.c_str());
+			} else {
+				LOGERROR("Property override failed, code %d\n", error);
+				return;
+			}
+			// TODO: Confirm whether we actually need to update the props in prop.default
+			std::string sed_patchlevel_orig = "sed -i 's/ro.build.version.security_patch=.*/ro.build.version.security_patch=" + patchlevel_orig + "/g' /prop.default";
+			TWFunc::Exec_Cmd(sed_patchlevel_orig);
+		}
+	} else {
+		return;
+	}
+}
+
+static unsigned int get_blkdev_size(int fd) {
+	unsigned long nr_sec;
+
+	if ( (ioctl(fd, BLKGETSIZE, &nr_sec)) == -1) {
+		nr_sec = 0;
+	}
+
+	return (unsigned int) nr_sec;
+}
+
+#define CRYPT_FOOTER_OFFSET 0x4000
+static char footer[16 * 1024];
+const char* userdata_path;
+static off64_t offset;
+
+int footer_br(const string& command) {
+	int fd;
+
+	if (command == "backup") {
+		unsigned int nr_sec;
+		TWPartition* userdata = PartitionManager.Find_Partition_By_Path("/data");
+		userdata_path = userdata->Actual_Block_Device.c_str();
+		fd = open(userdata_path, O_RDONLY);
+		if (fd < 0) {
+			LOGERROR("E:footer_backup: Cannot open '%s': %s\n", userdata_path, strerror(errno));
+			return -1;
+		}
+		if ((nr_sec = get_blkdev_size(fd))) {
+			offset = ((off64_t)nr_sec * 512) - CRYPT_FOOTER_OFFSET;
+		} else {
+			LOGERROR("E:footer_br: Failed to get offset\n");
+			close(fd);
+			return -1;
+		}
+		if (lseek64(fd, offset, SEEK_SET) == -1) {
+			LOGERROR("E:footer_backup: Failed to lseek64\n");
+			close(fd);
+			return -1;
+		}
+		if (read(fd, footer, sizeof(footer)) != sizeof(footer)) {
+			LOGERROR("E:footer_br: Failed to read: %s\n", strerror(errno));
+			close(fd);
+			return -1;
+		}
+		close(fd);
+	} else if (command == "restore") {
+		fd = open(userdata_path, O_WRONLY);
+		if (fd < 0) {
+			LOGERROR("E:footer_restore: Cannot open '%s': %s\n", userdata_path, strerror(errno));
+			return -1;
+		}
+		if (lseek64(fd, offset, SEEK_SET) == -1) {
+			LOGERROR("E:footer_restore: Failed to lseek64\n");
+			close(fd);
+			return -1;
+		}
+		if (write(fd, footer, sizeof(footer)) != sizeof(footer)) {
+			LOGERROR("E:footer_br: Failed to write: %s\n", strerror(errno));
+			close(fd);
+			return -1;
+		}
+		close(fd);
+	} else {
+		LOGERROR("E:footer_br: wrong command argument: %s\n", command.c_str());
+		return -1;
+	}
+	return 0;
+}
 
 /* vdc Functions */
 typedef struct {
@@ -801,8 +994,13 @@ int Exec_vdc_cryptfs(const string& command, const string& argument, vdc_ReturnVa
 		}
 	}
 
-	const char *cmd[] = { "/system/bin/vdc", "cryptfs" };
+	// getpwtype and checkpw commands are removed from Pie vdc, using modified vdc_pie
+	const char *cmd[] = { "/sbin/vdc_pie", "cryptfs" };
+	if (sdkver < 28)
+		cmd[0] = "/system/bin/vdc";
 	const char *env[] = { "LD_LIBRARY_PATH=/system/lib64:/system/lib", NULL };
+
+	LOGINFO("sdkver: %d, using %s\n", sdkver, cmd[0]);
 
 #ifdef TW_CRYPTO_SYSTEM_VOLD_DEBUG
 	string log_name = "/tmp/strace_vdc_" + command;
@@ -918,6 +1116,9 @@ int Exec_vdc_cryptfs(const string& command, const string& argument, vdc_ReturnVa
 					return -1;
 				}
 			}
+			if (sdkver >= 28) {
+				return WEXITSTATUS(status);
+			}
 			return 0;
 		}
 	}
@@ -930,32 +1131,34 @@ int Run_vdc(const string& Password) {
 
 	LOGINFO("About to run vdc...\n");
 
-	// Wait for vold connection
-	gettimeofday(&t1, NULL);
-	t2 = t1;
-	while ((t2.tv_sec - t1.tv_sec) < 5) {
-		// cryptfs getpwtype returns: R1=213(PasswordTypeResult)   R2=?   R3="password", "pattern", "pin", "default"
-		res = Exec_vdc_cryptfs("getpwtype", "", &vdcResult);
-		if (vdcResult.ResponseCode == PASSWORD_TYPE_RESULT) {
-			res = 0;
-			break;
+	// Pie vdc communicates with vold directly, no socket so lets not waste time
+	if (sdkver < 28) {
+		// Wait for vold connection
+		gettimeofday(&t1, NULL);
+		t2 = t1;
+		while ((t2.tv_sec - t1.tv_sec) < 5) {
+			// cryptfs getpwtype returns: R1=213(PasswordTypeResult)   R2=?   R3="password", "pattern", "pin", "default"
+			res = Exec_vdc_cryptfs("getpwtype", "", &vdcResult);
+			if (vdcResult.ResponseCode == PASSWORD_TYPE_RESULT) {
+				res = 0;
+				break;
+			}
+			LOGINFO("Retrying connection to vold (Reason: %s)\n", vdcResult.Output.c_str());
+			usleep(SLEEP_MIN_USEC); // vdc usually usleep(10000), but that causes too many unnecessary attempts
+			gettimeofday(&t2, NULL);
 		}
-		LOGINFO("Retrying connection to vold (Reason: %s)\n", vdcResult.Output.c_str());
-		usleep(SLEEP_MIN_USEC); // vdc usually usleep(10000), but that causes too many unnecessary attempts
-		gettimeofday(&t2, NULL);
+
+		if (res == 0 && (t2.tv_sec - t1.tv_sec) < 5)
+			LOGINFO("Connected to vold: %s\n", vdcResult.Output.c_str());
+		else if (res == VD_ERR_VOLD_OPERATION_TIMEDOUT)
+			return VD_ERR_VOLD_OPERATION_TIMEDOUT; // should never happen for getpwtype
+		else if (res)
+			return VD_ERR_FORK_EXECL_ERROR;
+		else if (vdcResult.ResponseCode != -1)
+			return VD_ERR_VOLD_UNEXPECTED_RESPONSE;
+		else
+			return VD_ERR_VDC_FAILED_TO_CONNECT;
 	}
-
-	if (res == 0 && (t2.tv_sec - t1.tv_sec) < 5)
-		LOGINFO("Connected to vold: %s\n", vdcResult.Output.c_str());
-	else if (res == VD_ERR_VOLD_OPERATION_TIMEDOUT)
-		return VD_ERR_VOLD_OPERATION_TIMEDOUT; // should never happen for getpwtype
-	else if (res)
-		return VD_ERR_FORK_EXECL_ERROR;
-	else if (vdcResult.ResponseCode != -1)
-		return VD_ERR_VOLD_UNEXPECTED_RESPONSE;
-	else
-		return VD_ERR_VDC_FAILED_TO_CONNECT;
-
 
 	// Input password from GUI, or default password
 	res = Exec_vdc_cryptfs("checkpw", Password, &vdcResult);
@@ -969,6 +1172,12 @@ int Run_vdc(const string& Password) {
 	if (res == 0 && vdcResult.ResponseCode != COMMAND_OKAY)
 		return VD_ERR_VOLD_UNEXPECTED_RESPONSE;
 	*/
+
+	// our vdc returns vold binder op status,
+    // we care about status.ok() only which is 0
+	if (sdkver >= 28) {
+		vdcResult.Message = res;
+	}
 
 	if (vdcResult.Message != 0) {
 		// try falling back to Lollipop hex passwords
@@ -986,8 +1195,9 @@ int Run_vdc(const string& Password) {
 		*/
 	}
 
-	// vdc's return value is dependant upon source origin, it will either
+	// sdk < 28 vdc's return value is dependant upon source origin, it will either
 	// return 0 or ResponseCode, so disregard and focus on decryption instead
+	// our vdc always returns 0 on success
 	if (vdcResult.Message == 0) {
 		// Decryption successful wait for crypto blk dev
 		Wait_For_Property("ro.crypto.fs_crypto_blkdev");
@@ -1024,6 +1234,20 @@ int Vold_Decrypt_Core(const string& Password) {
 		return VD_ERR_MISSING_VDC;
 	}
 
+#ifdef TW_CRYPTO_SYSTEM_VOLD_MOUNT
+	vector<string> partitions = TWFunc::Split_String(TW_CRYPTO_SYSTEM_VOLD_MOUNT, " ");
+	for (size_t i = 0; i < partitions.size(); ++i) {
+		string mnt_point = "/" + partitions[i];
+		if(PartitionManager.Find_Partition_By_Path(mnt_point)) {
+			if (!PartitionManager.Mount_By_Path(mnt_point, true)) {
+				LOGERROR("Unable to mount %s\n", mnt_point.c_str());
+				return VD_ERR_UNABLE_TO_MOUNT_EXTRA;
+			}
+			LOGINFO("%s partition mounted\n", partitions[i].c_str());
+		}
+	}
+#endif
+
 	fp_kmsg = fopen("/dev/kmsg", "a");
 
 	LOGINFO("TW_CRYPTO_USE_SYSTEM_VOLD := true\n");
@@ -1059,13 +1283,28 @@ int Vold_Decrypt_Core(const string& Password) {
 	Symlink_Firmware_Files(is_vendor_symlinked, is_firmware_symlinked);
 
 	Set_Needed_Properties();
+#ifdef TW_INCLUDE_LIBRESETPROP
+	Update_Patch_Level();
+#endif
 
 	// Start services needed for vold decrypt
 	LOGINFO("Starting services...\n");
 #ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
 	for (size_t i = 0; i < Services.size(); ++i) {
-		if (Services[i].bin_exists)
+		if (Services[i].bin_exists) {
+			if (Services[i].Service_Binary.find("keymaster") != string::npos) {
+				Wait_For_Property("hwservicemanager.ready", 500000, "true");
+				LOGINFO("    hwservicemanager is ready.\n");
+			}
+
 			Services[i].is_running = Start_Service(Services[i].VOLD_Service_Name);
+
+			if (Services[i].Service_Binary == "qseecomd") {
+				if (Wait_For_Property("sys.listeners.registered", 500000, "true") == "true"
+						|| Wait_For_Property("vendor.sys.listeners.registered", 500000, "true") == "true")
+					LOGINFO("    qseecomd listeners registered.\n");
+			}
+		}
 	}
 #endif
 	is_vold_running = Start_Service("sys_vold");
@@ -1080,7 +1319,29 @@ int Vold_Decrypt_Core(const string& Password) {
 			}
 		}
 #endif
-		res = Run_vdc(Password);
+
+		/*
+		* Oreo and Pie vold on some devices alters footer causing
+		* system to ask for decryption password at next boot although
+		* password haven't changed so we save footer before and restore it
+		* after vold operations
+		*/
+		if (sdkver > 25) {
+			if (footer_br("backup") == 0) {
+				LOGINFO("footer_br: crypto footer backed up\n");
+				res = Run_vdc(Password);
+				if (footer_br("restore") == 0)
+					LOGINFO("footer_br: crypto footer restored\n");
+				else
+					LOGERROR("footer_br: Failed to restore crypto footer\n");
+			} else {
+				LOGERROR("footer_br: Failed to backup crypto footer, \
+					skipping decrypt to prevent data loss. Reboot recovery to try again...\n");
+				res = -1;
+			}
+		} else {
+			res = Run_vdc(Password);
+		}
 
 		if (res != 0) {
 			LOGINFO("Decryption failed\n");
@@ -1089,7 +1350,9 @@ int Vold_Decrypt_Core(const string& Password) {
 		LOGINFO("Failed to start vold\n");
 		res = VD_ERR_VOLD_FAILED_TO_START;
 	}
-
+#ifdef TW_INCLUDE_LIBRESETPROP
+	Revert_Patch_Level();
+#endif
 	// Stop services needed for vold decrypt so /system can be unmounted
 	LOGINFO("Stopping services...\n");
 	Stop_Service("sys_vold");
@@ -1116,13 +1379,38 @@ int Vold_Decrypt_Core(const string& Password) {
 		umount2(PartitionManager.Get_Android_Root_Path().c_str(), MNT_DETACH);
 	}
 
+#ifdef TW_CRYPTO_SYSTEM_VOLD_MOUNT
+	for (size_t i = 0; i < partitions.size(); ++i) {
+		string mnt_point = "/" + partitions[i];
+		if(PartitionManager.Is_Mounted_By_Path(mnt_point)) {
+			if (!PartitionManager.UnMount_By_Path(mnt_point, true)) {
+				LOGINFO("WARNING: %s partition could not be unmounted normally!\n", partitions[i].c_str());
+				umount2(mnt_point.c_str(), MNT_DETACH);
+			}
+		}
+	}
+#endif
+
 	LOGINFO("Finished.\n");
 
 #ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
+	Set_Needed_Properties();
 	// Restart previously running services
 	for (size_t i = 0; i < Services.size(); ++i) {
-		if (Services[i].resume)
+		if (Services[i].resume) {
+			if (Services[i].Service_Binary.find("keymaster") != string::npos) {
+				Wait_For_Property("hwservicemanager.ready", 500000, "true");
+				LOGINFO("    hwservicemanager is ready.\n");
+			}
+
 			Start_Service(Services[i].TWRP_Service_Name);
+
+			if (Services[i].Service_Binary == "qseecomd") {
+				if (Wait_For_Property("sys.listeners.registered", 500000, "true") == "true"
+						|| Wait_For_Property("vendor.sys.listeners.registered", 500000, "true") == "true")
+					LOGINFO("    qseecomd listeners registered.\n");
+			}
+		}
 	}
 #endif
 

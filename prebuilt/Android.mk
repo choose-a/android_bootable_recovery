@@ -21,7 +21,15 @@ else
     RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/sh
     RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libcrypto.so
     ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 23; echo $$?),0)
+        RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/grep
+        LOCAL_POST_INSTALL_CMD += $(hide) if [ -e "$(TARGET_RECOVERY_ROOT_OUT)/sbin/egrep" ]; then \
+                                    rm $(TARGET_RECOVERY_ROOT_OUT)/sbin/egrep; fi; ln -sr $(TARGET_RECOVERY_ROOT_OUT)/sbin/grep $(TARGET_RECOVERY_ROOT_OUT)/sbin/egrep; \
+                                    if [ -e "$(TARGET_RECOVERY_ROOT_OUT)/sbin/fgrep" ]; then \
+                                    rm $(TARGET_RECOVERY_ROOT_OUT)/sbin/fgrep; fi; ln -sr $(TARGET_RECOVERY_ROOT_OUT)/sbin/grep $(TARGET_RECOVERY_ROOT_OUT)/sbin/fgrep;
         RELINK_SOURCE_FILES += $(TARGET_RECOVERY_ROOT_OUT)/sbin/toybox
+        ifeq ($(shell test $(PLATFORM_SDK_VERSION) -gt 23; echo $$?),0)
+            RELINK_SOURCE_FILES += $(TARGET_RECOVERY_ROOT_OUT)/sbin/dd
+        endif
         ifneq ($(wildcard external/zip/Android.mk),)
             RELINK_SOURCE_FILES += $(TARGET_OUT_OPTIONAL_EXECUTABLES)/zip
         endif
@@ -30,6 +38,9 @@ else
         endif
         ifneq ($(wildcard system/core/libziparchive/Android.bp),)
             RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/unzip
+        endif
+        ifneq ($(wildcard external/one-true-awk/Android.bp),)
+            RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/awk
         endif
     endif
 endif
@@ -41,10 +52,16 @@ ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 27; echo $$?),0)
     RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/adbd
 endif
 RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/e2fsck
+ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 28; echo $$?),0)
+    RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/e2fsdroid
+endif
 RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/mke2fs
 RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/tune2fs
 RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/resize2fs
 RELINK_SOURCE_FILES += $(TARGET_RECOVERY_ROOT_OUT)/sbin/simg2img
+ifneq ($(TW_OZIP_DECRYPT_KEY),)
+    RELINK_SOURCE_FILES += $(TARGET_RECOVERY_ROOT_OUT)/sbin/ozip_decrypt
+endif
 ifneq ($(TARGET_ARCH), x86_64)
     RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/linker
 endif
@@ -137,14 +154,24 @@ ifeq ($(shell test $(PLATFORM_SDK_VERSION) -lt 24; echo $$?),0)
     RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libmincrypttwrp.so
 endif
 RELINK_SOURCE_FILES += $(TARGET_RECOVERY_ROOT_OUT)/sbin/toolbox
+
 ifneq ($(TW_OEM_BUILD),true)
     RELINK_SOURCE_FILES += $(TARGET_RECOVERY_ROOT_OUT)/sbin/twrp
 else
     TW_EXCLUDE_MTP := true
 endif
+
+ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 28; echo $$?),0)
 ifneq ($(TW_EXCLUDE_MTP), true)
-    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libtwrpmtp.so
+    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libtwrpmtp-ffs.so
+    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libasyncio.so
 endif
+else
+ifneq ($(TW_EXCLUDE_MTP), true)
+    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libtwrpmtp-legacy.so
+endif
+endif
+
 RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libext4_utils.so
 RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libaosprecovery.so
 ifneq ($(TW_INCLUDE_JPEG),)
@@ -174,7 +201,7 @@ ifeq ($(TW_INCLUDE_DUMLOCK), true)
     RELINK_SOURCE_FILES += $(TARGET_RECOVERY_ROOT_OUT)/sbin/htcdumlock
 endif
 ifeq ($(TW_INCLUDE_CRYPTO), true)
-    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libcryptfslollipop.so
+    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libcryptfsfde.so
     RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libcrypto.so
     RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libhardware.so
     RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libgpt_twrp.so
@@ -198,11 +225,16 @@ ifeq ($(TW_INCLUDE_CRYPTO), true)
             RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.gatekeeper@1.0.so
             RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/hwservicemanager
             RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/avbctl
-            RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/hwservicemanager
             RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/keystore
             RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/keystore_cli
             RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/servicemanager
             RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.system.wifi.keystore@1.0.so
+            ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 28; echo $$?),0)
+                RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.vibrator@1.0.so
+                RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.vibrator@1.1.so
+                RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.vibrator@1.2.so
+            endif
+
             ifneq ($(wildcard system/keymaster/keymaster_stl.cpp),)
                 RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libkeymaster_portable.so
                 RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libkeymaster_staging.so
@@ -214,6 +246,10 @@ ifeq ($(TW_INCLUDE_CRYPTO), true)
             ifneq ($(wildcard hardware/interfaces/weaver/1.0/Android.bp),)
                 RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.weaver@1.0.so
             endif
+            ifneq ($(wildcard hardware/interfaces/confirmationui/1.0/Android.bp),)
+                RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.confirmationui@1.0.so
+            endif
+
             RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libhardware_legacy.so
         else
             RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libkeymaster1.so
@@ -240,6 +276,7 @@ ifeq ($(TW_INCLUDE_CRYPTO), true)
     endif
 endif
 ifeq ($(AB_OTA_UPDATER), true)
+    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.boot@1.0.so
     RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/bootctl
     ifneq ($(TW_INCLUDE_CRYPTO), true)
         RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libhardware.so
@@ -296,7 +333,11 @@ ifeq ($(shell test $(PLATFORM_SDK_VERSION) -gt 22; echo $$?),0)
     RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/fsck.ntfs
     RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/mkfs.ntfs
     RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libntfs-3g.so
-    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libfuse.so
+    ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 28; echo $$?),0)
+        RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libfuse-lite.so
+    else
+        RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libfuse.so
+    endif
 else
     RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/ntfs-3g
     RELINK_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/ntfsfix
@@ -346,7 +387,24 @@ ifeq ($(shell test $(PLATFORM_SDK_VERSION) -gt 25; echo $$?),0)
     endif
 endif
 ifeq ($(shell test $(PLATFORM_SDK_VERSION) -gt 27; echo $$?),0)
-    RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libclang_rt.ubsan_standalone-aarch64-android.so
+    ifeq ($(TARGET_ARCH), arm64)
+        RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libclang_rt.ubsan_standalone-aarch64-android.so
+    endif
+    ifeq ($(TARGET_ARCH), arm)
+        RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libclang_rt.ubsan_standalone-arm-android.so
+    endif
+    ifeq ($(TARGET_ARCH), x86_64)
+        RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libclang_rt.ubsan_standalone-x86_64-android.so
+    endif
+    ifeq ($(TARGET_ARCH), x86)
+        RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libclang_rt.ubsan_standalone-i686-android.so
+    endif
+    ifeq ($(TARGET_ARCH), mips)
+        RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libclang_rt.ubsan_standalone-mips-android.so
+    endif
+    ifeq ($(TARGET_ARCH), mips64)
+        RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libclang_rt.ubsan_standalone-mips64-android.so
+    endif
     RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/liblogwrap.so
     RELINK_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libext2_misc.so
 endif
@@ -376,13 +434,15 @@ LOCAL_SRC_FILES := $(LOCAL_MODULE)
 include $(BUILD_PREBUILT)
 
 #mke2fs.conf
-include $(CLEAR_VARS)
-LOCAL_MODULE := mke2fs.conf
-LOCAL_MODULE_TAGS := eng
-LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
-LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/etc
-LOCAL_SRC_FILES := $(LOCAL_MODULE)
-include $(BUILD_PREBUILT)
+ifeq ($(shell test $(PLATFORM_SDK_VERSION) -lt 26; echo $$?),0)
+    include $(CLEAR_VARS)
+    LOCAL_MODULE := mke2fs.conf
+    LOCAL_MODULE_TAGS := eng
+    LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
+    LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/etc
+    LOCAL_SRC_FILES := $(LOCAL_MODULE)
+    include $(BUILD_PREBUILT)
+endif
 
 ifeq ($(BOARD_HAS_NO_REAL_SDCARD),)
 	ifeq ($(shell test $(PLATFORM_SDK_VERSION) -lt 23; echo $$?),0)
@@ -491,6 +551,17 @@ ifeq ($(TW_INCLUDE_DUMLOCK), true)
 	include $(BUILD_PREBUILT)
 endif
 
+ifeq ($(TW_USE_TOOLBOX), true)
+    include $(CLEAR_VARS)
+    LOCAL_MODULE := mkshrc_twrp
+    LOCAL_MODULE_STEM := mkshrc
+    LOCAL_MODULE_TAGS := eng
+    LOCAL_MODULE_CLASS := ETC
+    LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/etc
+    LOCAL_SRC_FILES := $(LOCAL_MODULE)
+    include $(BUILD_PREBUILT)
+endif
+
 #TWRP App "placeholder"
 include $(CLEAR_VARS)
 LOCAL_MODULE := me.twrp.twrpapp.apk
@@ -499,3 +570,36 @@ LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
 LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
 LOCAL_SRC_FILES := $(LOCAL_MODULE)
 include $(BUILD_PREBUILT)
+
+#TWRP App permissions for Android 9+
+include $(CLEAR_VARS)
+LOCAL_MODULE := privapp-permissions-twrpapp.xml
+LOCAL_MODULE_TAGS := eng
+LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
+LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
+LOCAL_SRC_FILES := $(LOCAL_MODULE)
+include $(BUILD_PREBUILT)
+
+ifeq ($(TW_INCLUDE_CRYPTO), true)
+    ifneq ($(TW_CRYPTO_USE_SYSTEM_VOLD),)
+        ifneq ($(shell test $(PLATFORM_SDK_VERSION) -ge 28; echo $$?),0)
+            # Prebuilt vdc_pie for pre-Pie SDK Platforms
+            include $(CLEAR_VARS)
+            LOCAL_MODULE := vdc_pie
+            LOCAL_MODULE_TAGS := eng
+            LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
+            LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
+            LOCAL_SRC_FILES := vdc_pie-$(TARGET_ARCH)
+            include $(BUILD_PREBUILT)
+        endif
+    endif
+endif
+
+ifneq (,$(filter $(TW_INCLUDE_REPACKTOOLS) $(TW_INCLUDE_RESETPROP) $(TW_INCLUDE_LIBRESETPROP), true))
+    ifeq ($(wildcard external/magisk-prebuilt/Android.mk),)
+        $(warning Magisk prebuilt tools not found!)
+        $(warning Please place https://github.com/TeamWin/external_magisk-prebuilt)
+        $(warning into external/magisk-prebuilt)
+        $(error magiskboot prebuilts not present; exiting)
+    endif
+endif

@@ -28,10 +28,12 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/mount.h>
 #include <unistd.h>
 
 #include <string.h>
 #include <stdio.h>
+#include <cutils/properties.h>
 
 #include "twcommon.h"
 #include "mtdutils/mounts.h"
@@ -67,10 +69,12 @@ extern "C" {
 
 #define AB_OTA "payload_properties.txt"
 
+#ifndef TW_NO_LEGACY_PROPS
 static const char* properties_path = "/dev/__properties__";
 static const char* properties_path_renamed = "/dev/__properties_kk__";
 static bool legacy_props_env_initd = false;
 static bool legacy_props_path_modified = false;
+#endif
 
 enum zip_type {
 	UNKNOWN_ZIP_TYPE = 0,
@@ -79,6 +83,7 @@ enum zip_type {
 	TWRP_THEME_ZIP_TYPE
 };
 
+#ifndef TW_NO_LEGACY_PROPS
 // to support pre-KitKat update-binaries that expect properties in the legacy format
 static int switch_to_legacy_properties()
 {
@@ -120,6 +125,7 @@ static int switch_to_new_properties()
 
 	return 0;
 }
+#endif
 
 static int Install_Theme(const char* path, ZipWrap *Zip) {
 #ifdef TW_OEM_BUILD // We don't do custom themes in OEM builds
@@ -150,7 +156,24 @@ static int Install_Theme(const char* path, ZipWrap *Zip) {
 }
 
 static int Prepare_Update_Binary(const char *path, ZipWrap *Zip, int* wipe_cache) {
-	if (!Zip->ExtractEntry(ASSUMED_UPDATE_BINARY_NAME, TMP_UPDATER_BINARY_PATH, 0755)) {
+	char arches[PATH_MAX];
+	std::string binary_name = ASSUMED_UPDATE_BINARY_NAME;
+	property_get("ro.product.cpu.abilist", arches, "error");
+	if (strcmp(arches, "error") == 0)
+		property_get("ro.product.cpu.abi", arches, "error");
+	vector<string> split = TWFunc::split_string(arches, ',', true);
+	std::vector<string>::iterator arch;
+	std::string base_name = binary_name;
+	base_name += "-";
+	for (arch = split.begin(); arch != split.end(); arch++) {
+		std::string temp = base_name + *arch;
+		if (Zip->EntryExists(temp)) {
+			binary_name = temp;
+			break;
+		}
+	}
+	LOGINFO("Extracting updater binary '%s'\n", binary_name.c_str());
+	if (!Zip->ExtractEntry(binary_name.c_str(), TMP_UPDATER_BINARY_PATH, 0755)) {
 		Zip->Close();
 		LOGERR("Could not extract '%s'\n", ASSUMED_UPDATE_BINARY_NAME);
 		return INSTALL_ERROR;
@@ -173,6 +196,7 @@ static int Prepare_Update_Binary(const char *path, ZipWrap *Zip, int* wipe_cache
 	return INSTALL_SUCCESS;
 }
 
+#ifndef TW_NO_LEGACY_PROPS
 static bool update_binary_has_legacy_properties(const char *binary) {
 	const char str_to_match[] = "ANDROID_PROPERTY_WORKSPACE";
 	int len_to_match = sizeof(str_to_match) - 1;
@@ -193,7 +217,7 @@ static bool update_binary_has_legacy_properties(const char *binary) {
 
 	void *data = mmap(NULL, finfo.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	if (data == MAP_FAILED) {
-		LOGINFO("has_legacy_properties: mmap (size=%zu) failed: %s!\n", finfo.st_size, strerror(errno));
+		LOGINFO("has_legacy_properties: mmap (size=%zu) failed: %s!\n", (size_t)finfo.st_size, strerror(errno));
 	} else {
 		if (memmem(data, finfo.st_size, str_to_match, len_to_match)) {
 			LOGINFO("has_legacy_properties: Found legacy property match!\n");
@@ -205,6 +229,7 @@ static bool update_binary_has_legacy_properties(const char *binary) {
 
 	return found;
 }
+#endif
 
 static int Run_Update_Binary(const char *path, ZipWrap *Zip, int* wipe_cache, zip_type ztype) {
 	int ret_val, pipe_fd[2], status, zip_verify;
@@ -275,7 +300,7 @@ static int Run_Update_Binary(const char *path, ZipWrap *Zip, int* wipe_cache, zi
 		} else if (strcmp(command, "set_progress") == 0) {
 			char* fraction_char = strtok(NULL, " \n");
 			float fraction_float = strtof(fraction_char, NULL);
-			DataManager::SetProgress(fraction_float);
+			DataManager::_SetProgress(fraction_float);
 		} else if (strcmp(command, "ui_print") == 0) {
 			char* display_value = strtok(NULL, "\n");
 			if (display_value) {
@@ -315,7 +340,7 @@ static int Run_Update_Binary(const char *path, ZipWrap *Zip, int* wipe_cache, zi
 }
 
 int TWinstall_zip(const char* path, int* wipe_cache) {
-	int ret_val, zip_verify = 1;
+	int ret_val, zip_verify = 1, unmount_system = 1;
 
 	if (strcmp(path, "error") == 0) {
 		LOGERR("Failed to get adb sideload file: '%s'\n", path);
@@ -326,43 +351,16 @@ int TWinstall_zip(const char* path, int* wipe_cache) {
 	if (strlen(path) < 9 || strncmp(path, "/sideload", 9) != 0) {
 		string digest_str;
 		string Full_Filename = path;
-		string digest_file = path;
-		string defmd5file = digest_file + ".md5sum";
-
-		if (TWFunc::Path_Exists(defmd5file)) {
-			digest_file += ".md5sum";
-		}
-		else {
-			digest_file += ".md5";
-		}
 
 		gui_msg("check_for_digest=Checking for Digest file...");
-		if (!TWFunc::Path_Exists(digest_file)) {
-			gui_msg("no_digest=Skipping Digest check: no Digest file found");
-		}
-		else {
-			if (TWFunc::read_file(digest_file, digest_str) != 0) {
-				LOGERR("Skipping MD5 check: MD5 file unreadable\n");
-			}
-			else {
-				twrpDigest *digest = new twrpMD5();
-				if (!twrpDigestDriver::stream_file_to_digest(Full_Filename, digest)) {
-					delete digest;
-					return INSTALL_CORRUPT;
-				}
-				string digest_check = digest->return_digest_string();
-				if (digest_str == digest_check) {
-					gui_msg(Msg("digest_matched=Digest matched for '{1}'.")(path));
-				}
-				else {
-					LOGERR("Aborting zip install: Digest verification failed\n");
-					delete digest;
-					return INSTALL_CORRUPT;
-				}
-				delete digest;
-			}
+
+		if (*path != '@' && !twrpDigestDriver::Check_File_Digest(Full_Filename)) {
+			LOGERR("Aborting zip install: Digest verification failed\n");
+			return INSTALL_CORRUPT;
 		}
 	}
+
+	DataManager::GetValue(TW_UNMOUNT_SYSTEM, unmount_system);
 
 #ifndef TW_OEM_BUILD
 	DataManager::GetValue(TW_SIGNED_ZIP_VERIFY_VAR, zip_verify);
@@ -415,6 +413,16 @@ int TWinstall_zip(const char* path, int* wipe_cache) {
 		return INSTALL_CORRUPT;
 	}
 
+	if (unmount_system) {
+		gui_msg("unmount_system=Unmounting System...");
+		if(!PartitionManager.UnMount_By_Path(PartitionManager.Get_Android_Root_Path(), true)) {
+			gui_err("unmount_system_err=Failed unmounting System");
+			return -1;
+		}
+		unlink("/system");
+		mkdir("/system", 0755);
+	}
+
 	time_t start, stop;
 	time(&start);
 	if (Zip.EntryExists(ASSUMED_UPDATE_BINARY_NAME)) {
@@ -435,7 +443,23 @@ int TWinstall_zip(const char* path, int* wipe_cache) {
 	} else {
 		if (Zip.EntryExists(AB_OTA)) {
 			LOGINFO("AB zip\n");
+			gui_msg(Msg(msg::kHighlight, "flash_ab_inactive=Flashing A/B zip to inactive slot: {1}")(PartitionManager.Get_Active_Slot_Display()=="A"?"B":"A"));
+			// We need this so backuptool can do its magic
+			bool system_mount_state = PartitionManager.Is_Mounted_By_Path(PartitionManager.Get_Android_Root_Path());
+			bool vendor_mount_state = PartitionManager.Is_Mounted_By_Path("/vendor");
+			PartitionManager.Mount_By_Path(PartitionManager.Get_Android_Root_Path(), true);
+			PartitionManager.Mount_By_Path("/vendor", true);
+			TWFunc::Exec_Cmd("cp -f /sbin/sh /tmp/sh");
+			mount("/tmp/sh", "/system/bin/sh", "auto", MS_BIND, NULL);
 			ret_val = Run_Update_Binary(path, &Zip, wipe_cache, AB_OTA_ZIP_TYPE);
+			umount("/system/bin/sh");
+			unlink("/tmp/sh");
+			if (!vendor_mount_state)
+				PartitionManager.UnMount_By_Path("/vendor", true);
+			if (!system_mount_state)
+				PartitionManager.UnMount_By_Path(PartitionManager.Get_Android_Root_Path(), true);
+			gui_warn("flash_ab_reboot=To flash additional zips, please reboot recovery to switch to the updated slot.");
+
 		} else {
 			if (Zip.EntryExists("ui.xml")) {
 				LOGINFO("TWRP theme zip\n");

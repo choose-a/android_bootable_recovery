@@ -10,6 +10,13 @@ LOCAL_SRC_FILES := \
     graphics_utils.cpp \
     events.cpp
 
+ifeq ($(TW_SUPPORT_INPUT_1_2_HAPTICS),true)
+    ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 28; echo $$?),0)
+        LOCAL_SHARED_LIBRARIES += android.hardware.vibrator@1.2 libhidlbase
+        LOCAL_CFLAGS += -DUSE_QTI_HAPTICS
+    endif
+endif
+
 ifneq ($(TW_BOARD_CUSTOM_GRAPHICS),)
     $(warning ****************************************************************************)
     $(warning * TW_BOARD_CUSTOM_GRAPHICS support has been deprecated in TWRP.            *)
@@ -21,7 +28,11 @@ ifeq ($(TW_TARGET_USES_QCOM_BSP), true)
   LOCAL_CFLAGS += -DMSM_BSP
   LOCAL_SRC_FILES += graphics_overlay.cpp
   ifeq ($(TARGET_PREBUILT_KERNEL),)
-    LOCAL_ADDITIONAL_DEPENDENCIES := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
+    ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 28; echo $$?),0)
+      LOCAL_REQUIRED_MODULES := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
+    else
+      LOCAL_ADDITIONAL_DEPENDENCIES := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
+    endif
     LOCAL_C_INCLUDES += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
   else
     ifeq ($(TARGET_CUSTOM_KERNEL_HEADERS),)
@@ -138,15 +149,22 @@ ifneq ($(TARGET_RECOVERY_OVERSCAN_PERCENT),)
 else
   LOCAL_CFLAGS += -DOVERSCAN_PERCENT=0
 endif
-ifeq ($(TW_SCREEN_BLANK_ON_BOOT), true)
-    LOCAL_CFLAGS += -DTW_SCREEN_BLANK_ON_BOOT
-endif
 ifeq ($(TW_FBIOPAN), true)
     LOCAL_CFLAGS += -DTW_FBIOPAN
 endif
 
-ifeq ($(BOARD_HAS_FLIPPED_SCREEN), true)
-LOCAL_CFLAGS += -DBOARD_HAS_FLIPPED_SCREEN
+ifneq ($(TW_ROTATION),)
+  ifeq (,$(filter 0 90 180 270, $(TW_ROTATION)))
+    $(error TW_ROTATION must be set to 0, 90, 180 or 270. Currently set to $(TW_ROTATION))
+  endif
+  LOCAL_CFLAGS += -DTW_ROTATION=$(TW_ROTATION)
+else
+  # Support for old flag
+  ifeq ($(BOARD_HAS_FLIPPED_SCREEN), true)
+    LOCAL_CFLAGS += -DTW_ROTATION=180
+  else
+    LOCAL_CFLAGS += -DTW_ROTATION=0
+  endif
 endif
 
 ifeq ($(TW_IGNORE_MAJOR_AXIS_0), true)
@@ -169,6 +187,11 @@ ifneq ($(TW_WHITELIST_INPUT),)
   LOCAL_CFLAGS += -DWHITELIST_INPUT=$(TW_WHITELIST_INPUT)
 endif
 
+ifeq ($(TW_HAPTICS_TSPDRV), true)
+  LOCAL_SRC_FILES += tspdrv.cpp
+  LOCAL_CFLAGS += -DTW_HAPTICS_TSPDRV
+endif
+
 ifeq ($(TW_DISABLE_TTF), true)
     $(warning ****************************************************************************)
     $(warning * TW_DISABLE_TTF support has been deprecated in TWRP.                      *)
@@ -179,7 +202,7 @@ endif
 LOCAL_CLANG := true
 
 LOCAL_CFLAGS += -DTWRES=\"$(TWRES_PATH)\"
-LOCAL_SHARED_LIBRARIES += libft2 libz libc libcutils libpng libutils
+LOCAL_SHARED_LIBRARIES += libft2 libz libc libcutils libpng libutils libc++
 ifneq ($(TW_INCLUDE_JPEG),)
     LOCAL_SHARED_LIBRARIES += libjpeg
 endif

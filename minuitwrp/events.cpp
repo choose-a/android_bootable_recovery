@@ -28,6 +28,10 @@
 #include <string.h>
 #include <fstream>
 
+#ifdef USE_QTI_HAPTICS
+#include <android/hardware/vibrator/1.2/IVibrator.h>
+#endif
+
 #include "../common.h"
 
 #include "minui.h"
@@ -123,18 +127,30 @@ int write_to_file(const std::string& fn, const std::string& line) {
 	return -1;
 }
 
+#ifndef TW_NO_HAPTICS
+#ifndef TW_HAPTICS_TSPDRV
 int vibrate(int timeout_ms)
 {
     if (timeout_ms > 10000) timeout_ms = 1000;
+    char tout[6];
+    sprintf(tout, "%i", timeout_ms);
 
+#ifdef USE_QTI_HAPTICS
+    android::sp<android::hardware::vibrator::V1_2::IVibrator> vib = android::hardware::vibrator::V1_2::IVibrator::getService();
+    if (vib != nullptr) {
+        vib->on((uint32_t)timeout_ms);
+    }
+#else
     if (std::ifstream(LEDS_HAPTICS_ACTIVATE_FILE).good()) {
-        write_to_file(LEDS_HAPTICS_DURATION_FILE, std::to_string(timeout_ms));
+        write_to_file(LEDS_HAPTICS_DURATION_FILE, tout);
         write_to_file(LEDS_HAPTICS_ACTIVATE_FILE, "1");
     } else
-        write_to_file(VIBRATOR_TIMEOUT_FILE, std::to_string(timeout_ms));
-
+        write_to_file(VIBRATOR_TIMEOUT_FILE, tout);
+#endif
     return 0;
 }
+#endif
+#endif
 
 /* Returns empty tokens */
 static char *vk_strtok_r(char *str, const char *delim, char **save_str)
@@ -722,7 +738,9 @@ static int vk_modify(struct ev *e, struct input_event *ev)
 
                 last_virt_key = e->vks[i].scancode;
 
+#ifndef TW_NO_HAPTICS
                 vibrate(VIBRATOR_TIME_MS);
+#endif
 
                 // Mark that all further movement until lift is discard,
                 // and make sure we don't come back into this area

@@ -22,9 +22,22 @@
 #include <string>
 #include <vector>
 
+#ifdef USE_FSCRYPT
+#include <ext4_utils/ext4_crypt.h>
+#else
+#include "ext4crypt_tar.h"
+#endif
+
 #include "twrpDigest/twrpDigest.hpp"
 
+#ifndef BUILD_TWRPTAR_MAIN
+#include "partitions.hpp"
+#endif
+
 using namespace std;
+
+#define CACHE_LOGS_DIR "/cache/"		// For devices with a dedicated cache partition
+#define DATA_LOGS_DIR "/data/"			// For devices that do not have a dedicated cache partition
 
 typedef enum
 {
@@ -34,6 +47,7 @@ typedef enum
 	rb_poweroff,
 	rb_bootloader,     // May also be fastboot
 	rb_download,
+	rb_edl,
 } RebootCommand;
 
 enum Archive_Type {
@@ -42,6 +56,7 @@ enum Archive_Type {
 	ENCRYPTED,
 	COMPRESSED_ENCRYPTED
 };
+
 
 // Partition class
 class TWFunc
@@ -52,8 +67,8 @@ public:
 	static string Get_Filename(const string& Path);                             // Trims the path off of a filename
 
 	static int Exec_Cmd(const string& cmd, string &result);                     //execute a command and return the result as a string by reference
-	static int Exec_Cmd(const string& cmd);                                     //execute a command
-	static int Wait_For_Child(pid_t pid, int *status, string Child_Name);       // Waits for pid to exit and checks exit status
+	static int Exec_Cmd(const string& cmd, bool Show_Errors = true);                   //execute a command, displays an error to the GUI if Show_Errors is true, Show_Errors is true by default
+	static int Wait_For_Child(pid_t pid, int *status, string Child_Name, bool Show_Errors = true); // Waits for pid to exit and checks exit status, displays an error to the GUI if Show_Errors is true which is the default
 	static int Wait_For_Child_Timeout(pid_t pid, int *status, const string& Child_Name, int timeout); // Waits for a pid to exit until the timeout is hit. If timeout is hit, kill the chilld.
 	static bool Path_Exists(string Path);                                       // Returns true if the path exists
 	static Archive_Type Get_File_Type(string fn);                               // Determines file type, 0 for unknown, 1 for gzip, 2 for OAES encrypted
@@ -85,6 +100,7 @@ public:
 	static int write_to_file(const string& fn, const string& line);             //write to file
 	static bool Try_Decrypting_Backup(string Restore_Path, string Password); // true for success, false for failed to decrypt
 	static string System_Property_Get(string Prop_Name);                // Returns value of Prop_Name from reading /system/build.prop
+	static string System_Property_Get(string Prop_Name, TWPartitionManager &PartitionManager, string Mount_Point);                // Returns value of Prop_Name from reading /system/build.prop
 	static string Get_Current_Date(void);                               // Returns the current date in ccyy-m-dd--hh-nn-ss format
 	static void Auto_Generate_Backup_Name();                            // Populates TW_BACKUP_NAME with a backup name based on current date and ro.build.display.id from /system/build.prop
 	static void Fixup_Time_On_Boot(const string& time_paths = ""); // Fixes time on devices which need it (time_paths is a space separated list of paths to check for ats_* files)
@@ -99,6 +115,12 @@ public:
 	static void copy_kernel_log(string curr_storage); // Copy Kernel Log to Current Storage (PSTORE/KMSG)
 	static bool isNumber(string strtocheck); // return true if number, false if not a number
 	static int stream_adb_backup(string &Restore_Name); // Tell ADB Backup to Stream to TWRP from GUI selection
+	static std::string get_log_dir(); // return recovery log storage directory
+	static void check_selinux_support(); // print whether selinux support is enabled to console
+	static bool Is_TWRP_App_In_System(); // Check if the TWRP app is installed in the system partition
+	static int Property_Override(string Prop_Name, string Prop_Value); // Override properties (including ro. properties)
+	static bool Get_Encryption_Policy(ext4_encryption_policy &policy, std::string path); // return encryption policy for path
+	static bool Set_Encryption_Policy(std::string path, const ext4_encryption_policy &policy); // set encryption policy for path
 
 private:
 	static void Copy_Log(string Source, string Destination);

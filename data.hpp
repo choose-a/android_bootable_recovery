@@ -23,8 +23,6 @@
 #include <pthread.h>
 #include "infomanager.hpp"
 
-#define PERSIST_SETTINGS_FILE  "/persist/.twrps"
-
 using namespace std;
 
 class DataManager
@@ -51,7 +49,8 @@ public:
 	static int SetValue(const string& varName, const float value, const int persist = 0);
 	static int SetValue(const string& varName, const unsigned long long& value, const int persist = 0);
 	static int SetProgress(const float Fraction);
-	static int ShowProgress(const float Portion, const float Seconds);
+	static int _SetProgress(float Fraction);
+	static int ShowProgress(float Portion, const float Seconds);
 
 	static void DumpValues();
 	static void update_tz_environment_variables();

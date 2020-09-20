@@ -62,17 +62,24 @@ OpenRecoveryScript::VoidFunction OpenRecoveryScript::call_after_cli_command;
 #define SCRIPT_COMMAND_SIZE 512
 
 int OpenRecoveryScript::check_for_script_file(void) {
-	if (!PartitionManager.Mount_By_Path(SCRIPT_FILE_CACHE, false)) {
-		LOGINFO("Unable to mount /cache for OpenRecoveryScript support.\n");
-		gui_msg(Msg(msg::kError, "unable_to_mount=Unable to mount {1}")(SCRIPT_FILE_CACHE));
+	std::string logDir = TWFunc::get_log_dir();
+	std::string orsFile;
+	if (logDir == DATA_LOGS_DIR)
+		orsFile = "/data/cache";
+	else
+		orsFile = logDir;
+	orsFile += "/recovery/openrecoveryscript";
+	if (!PartitionManager.Mount_By_Path(orsFile, false)) {
+		LOGINFO("Unable to mount %s for OpenRecoveryScript support.\n", logDir.c_str());
+		gui_msg(Msg(msg::kError, "unable_to_mount=Unable to mount {1}")(logDir.c_str()));
 		return 0;
 	}
-	if (TWFunc::Path_Exists(SCRIPT_FILE_CACHE)) {
-		LOGINFO("Script file found: '%s'\n", SCRIPT_FILE_CACHE);
+	if (TWFunc::Path_Exists(orsFile)) {
+		LOGINFO("Script file found: '%s'\n", orsFile.c_str());
 		// Copy script file to /tmp
-		TWFunc::copy_file(SCRIPT_FILE_CACHE, SCRIPT_FILE_TMP, 0755);
-		// Delete the file from /cache
-		unlink(SCRIPT_FILE_CACHE);
+		TWFunc::copy_file(orsFile, SCRIPT_FILE_TMP, 0755);
+		// Delete the file from cache
+		unlink(orsFile.c_str());
 		return 1;
 	}
 	return 0;
@@ -147,8 +154,8 @@ int OpenRecoveryScript::run_script_file(void) {
 				// Wipe
 				if (strcmp(value, "cache") == 0 || strcmp(value, "/cache") == 0) {
 					PartitionManager.Wipe_By_Path("/cache");
-				} else if (strcmp(value, PartitionManager.Get_Android_Root_Path().c_str()) == 0 || strcmp(value, PartitionManager.Get_Android_Root_Path().c_str()) == 0) {
-					PartitionManager.Wipe_By_Path(PartitionManager.Get_Android_Root_Path());
+				} else if (strcmp(value, "system") == 0 || strcmp(value, "/system") == 0 || strcmp(value, PartitionManager.Get_Android_Root_Path().c_str()) == 0) {
+					PartitionManager.Wipe_By_Path("/system");
 				} else if (strcmp(value, "dalvik") == 0 || strcmp(value, "dalvick") == 0 || strcmp(value, "dalvikcache") == 0 || strcmp(value, "dalvickcache") == 0) {
 					PartitionManager.Wipe_Dalvik_Cache();
 				} else if (strcmp(value, "data") == 0 || strcmp(value, "/data") == 0 || strcmp(value, "factory") == 0 || strcmp(value, "factoryreset") == 0) {
@@ -177,7 +184,7 @@ int OpenRecoveryScript::run_script_file(void) {
 					strncpy(value2, tok, line_len - remove_nl);
 					DataManager::SetValue(TW_BACKUP_NAME, value2);
 					gui_msg(Msg("backup_folder_set=Backup folder set to '{1}'")(value2));
-					if (PartitionManager.Check_Backup_Name(true) != 0) {
+					if (PartitionManager.Check_Backup_Name(value2, true, true) != 0) {
 						ret_val = 1;
 						continue;
 					}
@@ -300,6 +307,8 @@ int OpenRecoveryScript::run_script_file(void) {
 					strcat(mount, value);
 				} else
 					strcpy(mount, value);
+				if (!strcmp(mount, "/system"))
+					strcpy(mount, PartitionManager.Get_Android_Root_Path().c_str());
 				if (PartitionManager.Mount_By_Path(mount, true))
 					gui_msg(Msg("mounted=Mounted '{1}'")(mount));
 			} else if (strcmp(command, "unmount") == 0 || strcmp(command, "umount") == 0) {
@@ -310,6 +319,8 @@ int OpenRecoveryScript::run_script_file(void) {
 					strcat(mount, value);
 				} else
 					strcpy(mount, value);
+				if (!strcmp(mount, "/system"))
+					strcpy(mount, PartitionManager.Get_Android_Root_Path().c_str());
 				if (PartitionManager.UnMount_By_Path(mount, true))
 					gui_msg(Msg("unmounted=Unounted '{1}'")(mount));
 			} else if (strcmp(command, "set") == 0) {
@@ -342,6 +353,8 @@ int OpenRecoveryScript::run_script_file(void) {
 					TWFunc::tw_reboot(rb_bootloader);
 				else if (strlen(value) && strcmp(value, "download") == 0)
 					TWFunc::tw_reboot(rb_download);
+				else if (strlen(value) && strcmp(value, "edl") == 0)
+					TWFunc::tw_reboot(rb_edl);
 				else
 					TWFunc::tw_reboot(rb_system);
 			} else if (strcmp(command, "cmd") == 0) {
@@ -392,13 +405,22 @@ int OpenRecoveryScript::run_script_file(void) {
 				if (ret_val != 0)
 					ret_val = 1; // failure
 			} else if (strcmp(command, "decrypt") == 0) {
+				// twrp cmd cannot decrypt a password with space, should decrypt on gui
 				if (*value) {
-					ret_val = PartitionManager.Decrypt_Device(value);
+					string tmp = value;
+					std::vector<string> args = TWFunc::Split_String(tmp, " ");
+
+					string pass = args[0];
+					string userid = "0";
+					if (args.size() > 1)
+						userid = args[1];
+
+					ret_val = PartitionManager.Decrypt_Device(pass, atoi(userid.c_str()));
 					if (ret_val != 0)
-						ret_val = 1; // failure
+						ret_val = 1;  // failure
 				} else {
 					gui_err("no_pwd=No password provided.");
-					ret_val = 1; // failure
+					ret_val = 1;  // failure
 				}
 			} else {
 				LOGERR("Unrecognized script command: '%s'\n", command);
@@ -409,23 +431,28 @@ int OpenRecoveryScript::run_script_file(void) {
 		unlink(SCRIPT_FILE_TMP);
 		gui_msg("done_ors=Done processing script file");
 	} else {
-		gui_msg(Msg(msg::kError, "error_opening_strerr=Error opening: '{1}' ({2})")(SCRIPT_FILE_TMP)(strerror(errno)));
+		gui_msg(Msg(msg::kError, "error_opening_strerr=Error opening: '{1}' ({2})")(SCRIPT_FILE_TMP)(
+			strerror(errno)));
 		return 1;
 	}
 
-	if (install_cmd && DataManager::GetIntValue(TW_HAS_INJECTTWRP) == 1 && DataManager::GetIntValue(TW_INJECT_AFTER_ZIP) == 1) {
+	if (install_cmd && DataManager::GetIntValue(TW_HAS_INJECTTWRP) == 1 &&
+	DataManager::GetIntValue(TW_INJECT_AFTER_ZIP) == 1) {
 		gui_msg("injecttwrp=Injecting TWRP into boot image...");
 		TWPartition* Boot = PartitionManager.Find_Partition_By_Path("/boot");
 		if (Boot == NULL || Boot->Current_File_System != "emmc")
-			TWFunc::Exec_Cmd("injecttwrp --dump /tmp/backup_recovery_ramdisk.img /tmp/injected_boot.img --flash");
+			TWFunc::Exec_Cmd(
+			"injecttwrp --dump /tmp/backup_recovery_ramdisk.img /tmp/injected_boot.img --flash");
 		else {
-			string injectcmd = "injecttwrp --dump /tmp/backup_recovery_ramdisk.img /tmp/injected_boot.img --flash bd=" + Boot->Actual_Block_Device;
+			string injectcmd =
+			"injecttwrp --dump /tmp/backup_recovery_ramdisk.img /tmp/injected_boot.img --flash bd=" +
+			Boot->Actual_Block_Device;
 			TWFunc::Exec_Cmd(injectcmd.c_str());
 		}
 		gui_msg("done=Done.");
 	}
 	if (sideload)
-		ret_val = 1; // Forces booting to the home page after sideload
+		ret_val = 1;  // Forces booting to the home page after sideload
 	return ret_val;
 }
 
@@ -638,23 +665,52 @@ int OpenRecoveryScript::Run_OpenRecoveryScript_Action() {
 
 // this is called by the "twcmd" GUI action when a command is received via FIFO from the "twrp" command line tool
 void OpenRecoveryScript::Run_CLI_Command(const char* command) {
-	if (strlen(command) > 11 && strncmp(command, "runscript", 9) == 0) {
-		const char* filename = command + 10;
-		if (OpenRecoveryScript::copy_script_file(filename) == 0) {
-			LOGINFO("Unable to copy script file\n");
+	string tmp = command;
+	std::vector<string> parts =
+		TWFunc::Split_String(tmp, " ");  // pats[0] is cmd, parts[1...] is args
+	string cmd_str = parts[0];
+
+	if (cmd_str == "runscript") {
+		if (parts.size() > 1) {
+			string filename = parts[1];
+			if (OpenRecoveryScript::copy_script_file(filename) == 0) {
+				LOGINFO("Unable to copy script file\n");
+			} else {
+				OpenRecoveryScript::run_script_file();
+			}
 		} else {
-			OpenRecoveryScript::run_script_file();
+			LOGINFO("Missing parameter: script file name\n");
 		}
-	} else if (strlen(command) > 5 && strncmp(command, "get", 3) == 0) {
-		const char* varname = command + 4;
-		string value;
-		DataManager::GetValue(varname, value);
-		gui_print("%s = %s\n", varname, value.c_str());
-	} else if (strlen(command) > 9 && strncmp(command, "decrypt", 7) == 0) {
-		const char* pass = command + 8;
-		gui_msg("decrypt_cmd=Attempting to decrypt data partition via command line.");
-		if (PartitionManager.Decrypt_Device(pass) == 0) {
-			// set_page_done = 1;  // done by singleaction_page anyway
+	} else if (cmd_str == "get") {
+		if (parts.size() > 1) {
+			string varname = parts[1];
+			string value;
+			DataManager::GetValue(varname, value);
+			gui_print("%s = %s\n", varname.c_str(), value.c_str());
+		} else {
+			LOGINFO("Missing parameter: var name\n");
+		}
+	} else if (cmd_str == "decrypt") {
+		// twrp cmd cannot decrypt a password with space, should decrypt on gui
+		if (parts.size() == 1) {
+			gui_err("no_pwd=No password provided.");
+		} else {
+			string pass = parts[1];
+			string userid = "0";
+			if (parts.size() > 2)
+				userid = parts[2];
+
+			gui_msg("decrypt_cmd=Attempting to decrypt data partition or user data via command line.");
+			if (PartitionManager.Decrypt_Device(pass, atoi(userid.c_str())) == 0) {
+				// set_page_done = 1;  // done by singleaction_page anyway
+				std::string logDir = TWFunc::get_log_dir();
+				if (logDir == DATA_LOGS_DIR)
+					logDir = "/data/cache";
+				std::string orsFile = logDir + "/openrecoveryscript";
+				if (TWFunc::Path_Exists(orsFile)) {
+					Run_OpenRecoveryScript_Action();
+				}
+			}
 		}
 	} else if (OpenRecoveryScript::Insert_ORS_Command(command)) {
 		OpenRecoveryScript::run_script_file();
